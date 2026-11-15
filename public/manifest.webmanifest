@@ -1,9 +1,9 @@
 {
   "name": "蚀刻防线 Etched Frontier",
   "short_name": "蚀刻防线",
-  "description": "动态造迷宫 × 能量回路耦合 × 肉鸽构筑的横屏塔防游戏,支持离线游玩。",
+  "description": "动态造迷宫 × 能量回路耦合 × 肉鸽构筑的横屏塔防游戏,支持无尽肉鸽模式与离线游玩。",
   "id": "/",
-  "start_url": "/",
+  "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "display_override": ["fullscreen", "standalone"],
@@ -11,11 +11,22 @@
   "background_color": "#05070d",
   "theme_color": "#05070d",
   "lang": "zh-CN",
+  "dir": "ltr",
   "categories": ["games", "strategy"],
+  "prefer_related_applications": false,
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    {
+      "name": "无尽肉鸽",
+      "short_name": "无尽",
+      "description": "直接进入无尽肉鸽模式",
+      "url": "/?mode=endless",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
   ]
 }

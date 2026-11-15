@@ -1,4 +1,4 @@
-import { CHAPTERS, COLS, ROWS, ELEM_COLOR, EMIT_BASE, type Elem } from "./data";
+import { CHAPTERS, COLS, ROWS, ELEM_COLOR, EMIT_BASE, TRAIT_MAP, type Elem } from "./data";
 import { Game, T_MAG, T_ORE, T_PIN, T_POUT, T_ROCK, T_VENT, type Building } from "./engine";
 
 export interface View {
@@ -237,6 +237,25 @@ export function render(c: CanvasRenderingContext2D, g: Game, v: View, dpr: numbe
     if (!b.beams.length || !b.pw) continue;
     const col = ELEM_COLOR[b.pw.src.def.elem as Elem];
     for (const m of b.beams) {
+      if (b.type === "flamer") {
+        const dx = m.x - (b.x + 0.5);
+        const dy = m.y - (b.y + 0.5);
+        const fl = 0.8 + Math.sin(t * 40 + m.x * 7) * 0.2;
+        c.strokeStyle = "#fb923c";
+        c.globalAlpha = 0.55;
+        c.lineWidth = Math.max(5, cell * 0.3) * fl;
+        c.lineCap = "round";
+        c.beginPath();
+        c.moveTo(px(b.x + 0.5), px(b.y + 0.5));
+        c.lineTo(px(b.x + 0.5 + dx * 0.95), px(b.y + 0.5 + dy * 0.95));
+        c.stroke();
+        c.strokeStyle = "#fde047";
+        c.lineWidth = Math.max(2, cell * 0.12);
+        c.stroke();
+        c.lineCap = "butt";
+        c.globalAlpha = 1;
+        continue;
+      }
       c.strokeStyle = col;
       c.lineWidth = Math.max(2, cell * 0.12);
       c.globalAlpha = 0.9;
@@ -286,6 +305,21 @@ export function render(c: CanvasRenderingContext2D, g: Game, v: View, dpr: numbe
       c.lineTo(X, Y + r * 1.2);
       c.lineTo(X - r, Y);
       c.closePath();
+    } else if (id === "medic") {
+      const a = r * 0.4;
+      c.moveTo(X - a, Y - r);
+      c.lineTo(X + a, Y - r);
+      c.lineTo(X + a, Y - a);
+      c.lineTo(X + r, Y - a);
+      c.lineTo(X + r, Y + a);
+      c.lineTo(X + a, Y + a);
+      c.lineTo(X + a, Y + r);
+      c.lineTo(X - a, Y + r);
+      c.lineTo(X - a, Y + a);
+      c.lineTo(X - r, Y + a);
+      c.lineTo(X - r, Y - a);
+      c.lineTo(X - a, Y - a);
+      c.closePath();
     } else if (id === "jammer") {
       for (let k = 0; k < 6; k++) c.lineTo(X + Math.cos((k * Math.PI) / 3) * r, Y + Math.sin((k * Math.PI) / 3) * r);
       c.closePath();
@@ -320,6 +354,32 @@ export function render(c: CanvasRenderingContext2D, g: Game, v: View, dpr: numbe
       c.beginPath();
       c.arc(X, Y, r + 2, 0, Math.PI * 2 * e.res);
       c.stroke();
+    }
+    if (e.shield > 0) {
+      c.strokeStyle = "rgba(56,189,248,0.85)";
+      c.lineWidth = 2.5;
+      c.beginPath();
+      c.arc(X, Y, r + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, e.shield / Math.max(1, e.maxShield)));
+      c.stroke();
+    }
+    if (e.regen > 0) {
+      c.fillStyle = "rgba(74,222,128,0.9)";
+      c.fillRect(X + r + 2, Y - 1, 4, 2);
+      c.fillRect(X + r + 3, Y - 2, 2, 4);
+    }
+    if (e.traits.length) {
+      c.font = `bold ${Math.max(9, cell * 0.26)}px sans-serif`;
+      c.textAlign = "center";
+      c.textBaseline = "middle";
+      let off = -(e.traits.length - 1) * 5;
+      for (const tid of e.traits) {
+        const tr = TRAIT_MAP[tid];
+        c.fillStyle = "rgba(0,0,0,0.7)";
+        c.fillRect(X + off - 5, Y + r + 2, 10, 11);
+        c.fillStyle = tr.color;
+        c.fillText(tr.short, X + off, Y + r + 8);
+        off += 10;
+      }
     }
     if (e.hp < e.maxHp) {
       const bw = Math.max(r * 2, cell * 0.5);
@@ -375,11 +435,16 @@ export function render(c: CanvasRenderingContext2D, g: Game, v: View, dpr: numbe
     } else if (f.k === "line") {
       c.strokeStyle = f.c;
       c.globalAlpha = 1 - k;
-      c.lineWidth = 2;
+      c.lineWidth = f.r ? f.r * (1 - k * 0.6) : 2;
       c.beginPath();
       c.moveTo(px(f.x), px(f.y));
       c.lineTo(px(f.x2 || 0), px(f.y2 || 0));
       c.stroke();
+      if (f.r) {
+        c.strokeStyle = "#fff";
+        c.lineWidth = Math.max(1, f.r * 0.35);
+        c.stroke();
+      }
       c.globalAlpha = 1;
     } else if (f.k === "text") {
       c.fillStyle = f.c;
@@ -567,6 +632,46 @@ function drawBuilding(c: CanvasRenderingContext2D, g: Game, b: Building, cell: n
       c.fillRect(0, -cell * 0.07, cell * 0.4, cell * 0.14);
       c.fillStyle = ec;
       c.fillRect(cell * 0.3, -cell * 0.1, cell * 0.1, cell * 0.2);
+    } else if (b.type === "shotgun") {
+      c.fillRect(0, -cell * 0.17, cell * 0.3, cell * 0.12);
+      c.fillRect(0, cell * 0.05, cell * 0.3, cell * 0.12);
+      c.fillRect(0, -cell * 0.05, cell * 0.2, cell * 0.1);
+    } else if (b.type === "flamer") {
+      c.fillRect(0, -cell * 0.1, cell * 0.3, cell * 0.2);
+      c.fillStyle = "#fb923c";
+      c.beginPath();
+      c.moveTo(cell * 0.3, -cell * 0.14);
+      c.lineTo(cell * 0.46, 0);
+      c.lineTo(cell * 0.3, cell * 0.14);
+      c.closePath();
+      c.fill();
+    } else if (b.type === "tesla") {
+      c.restore();
+      c.save();
+      c.strokeStyle = powered ? ec : "#64748b";
+      c.lineWidth = 2;
+      c.beginPath();
+      c.arc(cx, cy, cell * 0.28, 0, 7);
+      c.stroke();
+      c.fillStyle = "#e2e8f0";
+      for (let k = 0; k < 3; k++) {
+        const a = (k * Math.PI * 2) / 3 + (powered ? t * 2 : 0);
+        c.beginPath();
+        c.arc(cx + Math.cos(a) * cell * 0.28, cy + Math.sin(a) * cell * 0.28, cell * 0.06, 0, 7);
+        c.fill();
+      }
+      c.translate(cx, cy);
+    } else if (b.type === "missile") {
+      c.fillRect(0, -cell * 0.2, cell * 0.34, cell * 0.12);
+      c.fillRect(0, -cell * 0.06, cell * 0.34, cell * 0.12);
+      c.fillRect(0, cell * 0.08, cell * 0.34, cell * 0.12);
+      c.fillStyle = "#f87171";
+      c.fillRect(cell * 0.3, -cell * 0.2, cell * 0.06, cell * 0.4);
+    } else if (b.type === "rail") {
+      c.fillRect(-cell * 0.08, -cell * 0.12, cell * 0.62, cell * 0.06);
+      c.fillRect(-cell * 0.08, cell * 0.06, cell * 0.62, cell * 0.06);
+      c.fillStyle = ec;
+      c.fillRect(cell * 0.1, -cell * 0.06, cell * 0.12, cell * 0.12);
     } else if (b.type === "drone") {
       c.restore();
       c.save();

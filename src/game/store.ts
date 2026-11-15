@@ -14,6 +14,7 @@ export interface Save {
   daily: Record<string, number>; // date -> best score
   stats: { runs: number; wins: number; kills: number; bossKills: number };
   seenHelp: boolean;
+  endless: { best: number; runs: number; bestKills: number; bestBoss: number };
 }
 
 const KEY = "etched-frontier-save-v1";
@@ -32,13 +33,18 @@ export function defaultSave(): Save {
     daily: {},
     stats: { runs: 0, wins: 0, kills: 0, bossKills: 0 },
     seenHelp: false,
+    endless: { best: 0, runs: 0, bestKills: 0, bestBoss: 0 },
   };
 }
 
 function load(): Save {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...defaultSave(), ...JSON.parse(raw) };
+    if (raw) {
+      const d = defaultSave();
+      const p = JSON.parse(raw);
+      return { ...d, ...p, endless: { ...d.endless, ...(p.endless || {}) } };
+    }
   } catch {
     /* ignore */
   }
@@ -77,6 +83,7 @@ export function useSave(): Save {
       listeners.add(l);
       return () => listeners.delete(l);
     },
+    () => state,
     () => state
   );
 }

@@ -1,5 +1,10 @@
 import {
   BUILD_MAP,
+  CARDS,
+  MUTATORS,
+  RARITY_INFO,
+  TRAITS,
+  type CardDef,
   COLS,
   ROWS,
   ELEM_COLOR,
@@ -105,6 +110,11 @@ export interface Enemy {
   reward: number;
   res: number; // 当前展示的适应抗性
   gravT: number;
+  shield: number;
+  maxShield: number;
+  regen: number;
+  traits: string[];
+  tick: number;
 }
 export interface Proj {
   x: number;
@@ -164,6 +174,20 @@ interface QItem {
   type: string;
   elite: boolean;
   sp: number;
+  muts?: string[];
+}
+export interface RunBuffs {
+  heat: number;
+  crit: number;
+  pen: number;
+  exec: number;
+  echo: number;
+  interest: number;
+  regen: number;
+  enemySpd: number;
+  blast: number;
+  revive: number;
+  bounty: number;
 }
 
 export interface Stats {
@@ -187,6 +211,7 @@ export interface Stats {
   chain: number;
   nova: boolean;
   siphon: boolean;
+  hops: number;
   dps: number;
 }
 
@@ -199,6 +224,8 @@ export interface GameOpts {
   asc: number;
   seed: number;
   chapterUnlocked: number;
+  endless?: boolean;
+  noCards?: boolean;
 }
 
 export class Game {
@@ -270,11 +297,25 @@ export class Game {
   armorAff: number;
   commander: string;
   dmgSource: Record<string, number> = {};
+  // ===== 肉鸽 =====
+  endless: boolean;
+  mr: () => number;
+  rb: RunBuffs = { heat: 1, crit: 0, pen: 0, exec: 0, echo: 0, interest: 0, regen: 0, enemySpd: 1, blast: 0, revive: 0, bounty: 0 };
+  cardOffer: CardDef[] | null = null;
+  cardRerolls = 1;
+  cardsTaken: Record<string, number> = {};
+  cardOrder: string[] = [];
+  muts: string[] = [];
+  nextMuts: string[] = [];
+  blasting = false;
+  retreated = false;
 
   constructor(opts: GameOpts) {
     this.opts = opts;
     this.cfg = opts.level;
     this.rng = mulberry32(opts.seed);
+    this.mr = mulberry32((opts.seed ^ 0x5bd1e995) >>> 0);
+    this.endless = !!opts.endless;
     const a = opts.affixes;
     const has = (id: string) => a.includes(id);
     const asc = opts.asc;
@@ -303,7 +344,137 @@ export class Game {
     });
     this.genMap();
     this.recomputePaths();
-    this.say(`关卡 ${this.cfg.chapter}-${this.cfg.idx + 1}「${this.cfg.name}」 共 ${this.cfg.waves} 波`, "#9be7ff");
+    if (this.endless) this.say("无尽肉鸽:坚持得越久越强,每隔数波可抽取增益卡牌", "#9be7ff");
+    else this.say(`关卡 ${this.cfg.chapter}-${this.cfg.idx + 1}「${this.cfg.name}」 共 ${this.cfg.waves} 波`, "#9be7ff");
+    this.nextMuts = this.rollMutators(1);
+    if (!opts.noCards) this.offerCards(false);
+  }
+
+  // ===== 每局抽卡 =====
+  offerCards(boost: boolean) {
+    const w = this.wave;
+    const pool = CARDS.filter((c) => (this.cardsTaken[c.id] || 0) < c.max);
+    const bonus = Math.min(20, w * 0.6) + (boost ? 25 : 0);
+    const weightOf = (c: CardDef) => {
+      const base = RARITY_INFO[c.rarity].weight;
+      return c.rarity === "common" ? Math.max(18, base - bonus) : c.rarity === "rare" ? base + bonus * 0.6 : base + bonus * 0.4;
+    };
+    const picks: CardDef[] = [];
+    const bag = pool.slice();
+    while (picks.length < 3 && bag.length) {
+      let tot = 0;
+      for (const c of bag) tot += weightOf(c);
+      let x = this.mr() * tot;
+      let idx = 0;
+      for (let i = 0; i < bag.length; i++) {
+        x -= weightOf(bag[i]);
+        if (x <= 0) {
+          idx = i;
+          break;
+        }
+      }
+      picks.push(bag.splice(idx, 1)[0]);
+    }
+    if (boost && picks.length && !picks.some((c) => c.rarity !== "common")) {
+      const better = bag.filter((c) => c.rarity !== "common");
+      if (better.length) picks[0] = better[Math.floor(this.mr() * better.length)];
+    }
+    if (!picks.length) return;
+    this.cardOffer = picks;
+    if (this.endless && this.wave > 0) this.cardRerolls = Math.min(3, this.cardRerolls + 1);
+    this.version++;
+  }
+  rerollCards() {
+    if (!this.cardOffer || this.cardRerolls <= 0) return false;
+    this.cardRerolls--;
+    this.cardOffer = null;
+    this.offerCards(false);
+    return true;
+  }
+  scrapCardValue() {
+    return 120 + 10 * this.wave;
+  }
+  pickCard(i: number) {
+    if (!this.cardOffer) return;
+    const c = this.cardOffer[i];
+    if (!c) return;
+    const p = this.perk;
+    const rb = this.rb;
+    switch (c.id) {
+      case "c_dmg": p.dmg += 0.1; break;
+      case "c_rate": p.rate += 0.08; break;
+      case "c_range": p.range += 0.3; break;
+      case "c_scrap": this.scrap += this.scrapCardValue(); break;
+      case "c_loot": p.loot += 0.12; break;
+      case "c_hp": this.maxLives += 3; this.lives = Math.min(this.maxLives, this.lives + 3); break;
+      case "c_cost": p.costMul *= 0.92; break;
+      case "c_ether": this.etherMul *= 1.2; break;
+      case "r_heat": rb.heat *= 0.7; break;
+      case "r_crit": rb.crit += 0.08; break;
+      case "r_slot": p.slot += 1; this.powerDirty = true; break;
+      case "r_cap": p.cap += 1; this.powerDirty = true; break;
+      case "r_link": this.linkRange += 1; this.powerDirty = true; break;
+      case "r_pen": rb.pen += 0.12; break;
+      case "r_interest": rb.interest += 0.04; break;
+      case "r_regen": rb.regen += 1; break;
+      case "r_cdr":
+        for (const s of this.skills) {
+          s.maxCd *= 0.85;
+          s.cd = Math.min(s.cd, s.maxCd);
+        }
+        break;
+      case "r_legend": {
+        const ids = ["prism", "overdrive", "nova", "siphon"];
+        const id = ids[Math.floor(this.mr() * ids.length)];
+        this.tokens[id] = (this.tokens[id] || 0) + 1;
+        this.say(`获得免费放置权:${BUILD_MAP[id].name}`, "#fbbf24");
+        break;
+      }
+      case "e_power": p.dmg += 0.22; p.rate += 0.12; break;
+      case "e_blast": rb.blast += 1; break;
+      case "e_time": rb.enemySpd *= 0.9; break;
+      case "e_revive": rb.revive += 1; break;
+      case "e_bounty": rb.bounty += 1; break;
+      case "e_exec": rb.exec += 0.4; break;
+      case "e_echo": rb.echo += 0.15; break;
+    }
+    this.cardsTaken[c.id] = (this.cardsTaken[c.id] || 0) + 1;
+    if (!this.cardOrder.includes(c.id)) this.cardOrder.push(c.id);
+    this.say(`抽取卡牌:${c.name}`, RARITY_INFO[c.rarity].color);
+    this.cardOffer = null;
+    this.version++;
+  }
+  cardCount() {
+    let n = 0;
+    for (const k in this.cardsTaken) n += this.cardsTaken[k];
+    return n;
+  }
+  retreat() {
+    if (!this.endless || this.over) return;
+    this.retreated = true;
+    this.over = "lost";
+    this.version++;
+  }
+
+  // ===== 敌人肉鸽:波次变异 =====
+  rollMutators(w: number): string[] {
+    const cfg = this.cfg;
+    if (this.endless) {
+      if (w < 3 || w % 10 === 0) return [];
+    } else if (w < 3 || (cfg.boss && w === cfg.waves)) return [];
+    const p = this.endless ? Math.min(0.85, 0.3 + 0.03 * w) : 0.08 + 0.05 * cfg.chapter + 0.02 * this.opts.asc;
+    if (this.mr() > p) return [];
+    const n = this.endless ? 1 + (w >= 15 && this.mr() < 0.5 ? 1 : 0) + (w >= 35 ? 1 : 0) : 1;
+    const pool = MUTATORS.map((m) => m.id);
+    const out: string[] = [];
+    while (out.length < n && pool.length) out.push(pool.splice(Math.floor(this.mr() * pool.length), 1)[0]);
+    return out;
+  }
+  private rollTraits(n: number): string[] {
+    const pool = TRAITS.map((t) => t.id);
+    const out: string[] = [];
+    while (out.length < n && pool.length) out.push(pool.splice(Math.floor(this.mr() * pool.length), 1)[0]);
+    return out;
   }
 
   // ===== 地图生成 =====
@@ -860,6 +1031,7 @@ export class Game {
     let cool = 10;
     let nova = false;
     let siphon = false;
+    let hops = 0;
     switch (elem) {
       case "pulse": rate *= 1.2; break;
       case "cryo": dmg *= 0.75; cool += 15; break;
@@ -893,7 +1065,13 @@ export class Game {
       if (r.pierce) pierce += r.pierce;
       if (r.crit) crit += r.crit;
       if (r.shots) shots += r.shots;
+      if (r.hops) hops += r.hops;
     }
+    crit += this.rb.crit;
+    pen += this.rb.pen;
+    exec += this.rb.exec;
+    echo = Math.min(0.75, echo + this.rb.echo);
+    heatMul *= this.rb.heat;
     const tile = this.terr[b.y * COLS + b.x];
     let chain = 0;
     if (tile === T_VENT) {
@@ -909,8 +1087,8 @@ export class Game {
     range = (range + this.perk.range) * this.fogMul;
     heatMul *= this.heatAff;
     crit = Math.min(0.95, crit);
-    const dps = dmg * shotMul * shots * rate * (1 + crit * (critMul - 1)) * (1 + echo * 0.75);
-    return { elem, dmg, rate, range, splash, pen: Math.min(0.9, pen), shots, shotMul, crit, critMul, echo, cap, capMul, exec, pierce, heatMul, cool, chain, nova, siphon, dps };
+    const dps = dmg * shotMul * shots * rate * (1 + crit * (critMul - 1)) * (1 + echo * 0.75) * (base.hits || 1);
+    return { elem, dmg, rate, range, splash, pen: Math.min(0.9, pen), shots, shotMul, crit, critMul, echo, cap, capMul, exec, pierce, heatMul, cool, chain, nova, siphon, hops, dps };
   }
   heatScale(b: Building) {
     return this.cfg.heat || this.terr[b.y * COLS + b.x] === T_VENT ? 1 : 0;
@@ -936,10 +1114,16 @@ export class Game {
     }
     const armor = Math.max(0, e.armor - e.shred) * (o.armorK ?? 1) * (1 - (o.pen || 0));
     d = Math.max(d * 0.25, d - armor);
+    let absorbed = 0;
+    if (e.shield > 0) {
+      absorbed = Math.min(e.shield, d);
+      e.shield -= absorbed;
+      d -= absorbed;
+    }
     e.hp -= d;
     e.flash = 0.08;
-    if (e.def.boss) e.phaseDmg[elem] = (e.phaseDmg[elem] || 0) + d;
-    if (o.src) this.dmgSource[o.src.type] = (this.dmgSource[o.src.type] || 0) + d;
+    if (e.def.boss) e.phaseDmg[elem] = (e.phaseDmg[elem] || 0) + d + absorbed;
+    if (o.src) this.dmgSource[o.src.type] = (this.dmgSource[o.src.type] || 0) + d + absorbed;
     if (e.hp <= 0) {
       this.kill(e, o.src);
     } else if (e.def.boss && e.hp / e.maxHp <= e.nextPhase) {
@@ -973,24 +1157,59 @@ export class Game {
     this.kills++;
     let gain = e.reward * this.lootMul * (1 + this.perk.loot);
     if (src && src.pw && src.pw.mods.some((m) => m.type === "siphon")) gain += 3;
+    if (this.rb.bounty && (e.elite || e.def.boss)) gain *= 1 + 0.5 * this.rb.bounty;
     this.scrap += gain;
     this.addFx({ k: "text", x: e.x, y: e.y - 0.3, t: 0, ttl: 0.7, c: "#facc15", s: `+${Math.round(gain)}` });
     this.addFx({ k: "spark", x: e.x, y: e.y, t: 0, ttl: 0.3, c: e.def.color, r: e.def.r + 0.3 });
-    if (e.elite) this.ether += Math.ceil(3 * this.etherMul);
+    if (e.elite) this.ether += Math.ceil((3 + 2 * this.rb.bounty) * this.etherMul);
     if (e.def.boss) {
       this.bossKills++;
-      this.ether += Math.ceil(15 * this.etherMul);
+      this.ether += Math.ceil((15 + 6 * this.rb.bounty) * this.etherMul);
+    }
+    if (e.traits.includes("volatile")) this.volatileBlast(e);
+    if (e.traits.includes("brood") && this.enemies.length < 260) {
+      for (let k = 0; k < 2; k++) this.spawnEnemy("mini", e.scale * 0.7, e.x + (Math.random() - 0.5) * 0.4, e.y + (Math.random() - 0.5) * 0.4, { cx: e.cx, cy: e.cy });
+    }
+    if (this.rb.blast > 0 && !this.blasting && Math.random() < 0.15 + 0.1 * this.rb.blast) {
+      this.blasting = true;
+      const bd = 40 + 14 * this.wave;
+      for (const o of this.enemies.slice()) {
+        if (o.dead || o === e) continue;
+        if (Math.hypot(o.x - e.x, o.y - e.y) <= 1.3) this.hurt(o, bd, "sky", { pen: 0.5 });
+      }
+      this.addFx({ k: "ring", x: e.x, y: e.y, r: 1.3, t: 0, ttl: 0.35, c: "#fb7185" });
+      this.blasting = false;
     }
     if (e.def.split) {
       const t = e.def.id === "boss2" ? "splitter" : "mini";
       for (let k = 0; k < e.def.split; k++) this.spawnEnemy(t, e.scale * (t === "mini" ? 0.7 : 0.6), e.x + (Math.random() - 0.5) * 0.4, e.y + (Math.random() - 0.5) * 0.4, { cx: e.cx, cy: e.cy });
     }
   }
-  spawnEnemy(type: string, scale: number, x: number, y: number, o: { cx?: number; cy?: number; elite?: boolean; speedMul?: number } = {}) {
+  private volatileBlast(e: Enemy) {
+    const dmg = 35 + 5 * this.wave;
+    for (const b of this.buildings.slice()) {
+      if (Math.hypot(b.x + 0.5 - e.x, b.y + 0.5 - e.y) <= 1.6) {
+        b.hp -= dmg;
+        b.flash = 0.25;
+        if (b.hp <= 0) this.destroy(b);
+      }
+    }
+    this.addFx({ k: "ring", x: e.x, y: e.y, r: 1.6, t: 0, ttl: 0.4, c: "#fb923c" });
+  }
+  spawnEnemy(type: string, scale: number, x: number, y: number, o: { cx?: number; cy?: number; elite?: boolean; speedMul?: number; muts?: string[]; traits?: string[] } = {}) {
     const def = ENEMIES[type];
     const elite = !!o.elite;
-    const scaleRew = (1 + 0.04 * this.wave) * (1 + 0.05 * this.cfg.id);
-    const hp = def.hp * scale * (elite ? 3 : 1);
+    const muts = def.boss ? [] : o.muts || [];
+    const lvId = this.endless ? 8 : this.cfg.id;
+    const scaleRew = (1 + (this.endless ? 0.06 : 0.04) * this.wave) * (1 + 0.05 * lvId);
+    let hpM = 1;
+    if (muts.includes("horde")) hpM *= 0.8;
+    if (muts.includes("ironclad")) hpM *= 1.15;
+    if (muts.includes("bounty")) hpM *= 1.2;
+    const traits = def.boss ? [] : [...(o.traits || [])];
+    if (muts.includes("volatile") && this.mr() < 0.3) traits.push("volatile");
+    if (muts.includes("brood") && def.cost >= 22) traits.push("brood");
+    const hp = def.hp * scale * (elite ? 3 : 1) * hpM;
     const cx = o.cx ?? Math.floor(x);
     const cy = o.cy ?? Math.floor(y);
     const e: Enemy = {
@@ -1006,9 +1225,9 @@ export class Game {
       ty: -1,
       hp,
       maxHp: hp,
-      armor: def.armor + this.armorAff + (elite ? 2 : 0),
+      armor: def.armor + this.armorAff + (elite ? 2 : 0) + (muts.includes("ironclad") ? 3 : 0) + (traits.includes("plated") ? 3 : 0),
       shred: 0,
-      spd: def.spd * this.spdMul * (o.speedMul || 1),
+      spd: def.spd * this.spdMul * (o.speedMul || 1) * (muts.includes("frenzy") ? 1.25 : 1) * (traits.includes("swift") ? 1.35 : 1),
       scale,
       rem: this.distF[cy * COLS + cx],
       elite,
@@ -1025,16 +1244,27 @@ export class Game {
       phaseDmg: {},
       nextPhase: 0.75,
       flash: 0,
-      reward: def.reward * scaleRew * (elite ? 4 : 1),
+      reward: def.reward * scaleRew * (elite ? 4 : 1) * (muts.includes("bounty") ? 1.6 : 1),
       res: 0,
       gravT: 0,
+      shield: 0,
+      maxShield: 0,
+      regen: 0,
+      traits,
+      tick: 1 + Math.random() * 1.5,
     };
+    if (muts.includes("shielded")) e.shield = hp * 0.25;
+    if (traits.includes("shield")) e.shield = Math.max(e.shield, hp * 0.35);
+    e.maxShield = e.shield;
+    if (muts.includes("regen")) e.regen = 0.015;
+    if (traits.includes("regen")) e.regen = Math.max(e.regen, 0.025);
     this.enemies.push(e);
     return e;
   }
 
   // ===== 波次 =====
   hpScale(w: number) {
+    if (this.endless) return 1.2 * Math.pow(1 + 0.12 * (w - 1), 1.12) * Math.pow(1.03, Math.max(0, w - 15)) * this.hpMul;
     const g = this.cfg.id;
     return (1 + 0.1 * g) * Math.pow(1 + 0.15 * (w - 1), 1.1) * this.hpMul;
   }
@@ -1042,11 +1272,11 @@ export class Game {
     const cfg = this.cfg;
     const out: QItem[] = [];
     const swarm = this.hasAffix("swarm") ? 1.3 : 1;
-    const budget = (55 + 20 * w) * swarm;
-    const unlockW: Record<string, number> = { grunt: 1, runner: 2, tank: 4, phaser: 3, splitter: 5, jammer: 4, siege: 7 };
+    const budget = (this.endless ? (w <= 30 ? 55 + 20 * w : 655 + 12 * (w - 30)) : 55 + 20 * w) * swarm * (this.muts.includes("horde") ? 1.4 : 1);
+    const unlockW: Record<string, number> = { grunt: 1, runner: 2, tank: 4, phaser: 3, splitter: 5, jammer: 4, siege: 7, medic: 6 };
     const avail = cfg.pool.filter((t) => (unlockW[t] || 1) <= w);
-    const groups = w < 3 ? 1 : w < 8 ? 2 : 3;
-    const weights: Record<string, number> = { grunt: 3, runner: 2, tank: 2, phaser: 2, splitter: 1.5, jammer: 1, siege: 0.7 };
+    const groups = w < 3 ? 1 : w < 8 ? 2 : w < 20 || !this.endless ? 3 : 4;
+    const weights: Record<string, number> = { grunt: 3, runner: 2, tank: 2, phaser: 2, splitter: 1.5, jammer: 1, siege: 0.7, medic: 1.2 };
     let delay = 0;
     const last = w === cfg.waves;
     for (let g = 0; g < groups; g++) {
@@ -1068,11 +1298,19 @@ export class Game {
       for (let k = 0; k < n; k++) out.push({ at: delay + k * interval, type, elite: false, sp: this.spawns.length > 1 && k % 2 ? (sp + 1) % this.spawns.length : sp });
       delay += n * interval * 0.5 + 2;
     }
-    const eliteWave = w % 5 === 0 || (last && !cfg.boss) || (this.opts.asc >= 9 && w % 3 === 0);
+    const eliteWave = w % 5 === 0 || (last && !cfg.boss) || (this.opts.asc >= 9 && w % 3 === 0) || (this.endless && w >= 12 && w % 3 === 0);
+    const heavy = avail.filter((t) => ["tank", "siege", "splitter", "phaser", "jammer"].includes(t));
     if (eliteWave) {
-      const heavy = avail.filter((t) => ["tank", "siege", "splitter", "phaser", "jammer"].includes(t));
       const type = heavy.length ? heavy[Math.floor(this.r() * heavy.length)] : "tank";
-      out.push({ at: 3, type, elite: true, sp: 0 });
+      const ne = 1 + (this.endless ? Math.floor(w / 15) : 0);
+      for (let k = 0; k < ne; k++) out.push({ at: 3 + k * 1.5, type: k === 0 ? type : heavy[k % Math.max(1, heavy.length)] || "tank", elite: true, sp: k % this.spawns.length });
+    }
+    if (this.muts.includes("surge")) {
+      for (let k = 0; k < 3; k++) out.push({ at: 2 + k * 2, type: heavy.length ? heavy[Math.floor(this.mr() * heavy.length)] : "tank", elite: true, sp: k % this.spawns.length });
+    }
+    if (this.endless && w % 10 === 0) {
+      out.push({ at: 4, type: "boss" + ((((w / 10 - 1) | 0) % 4) + 1), elite: false, sp: Math.floor(this.spawns.length / 2) });
+      if (w >= 30) out.push({ at: 7, type: "tank", elite: true, sp: 0 });
     }
     if (last && cfg.boss) {
       out.push({ at: 4, type: "boss" + cfg.chapter, elite: false, sp: Math.floor(this.spawns.length / 2) });
@@ -1086,6 +1324,8 @@ export class Game {
   startWave() {
     this.wave++;
     const w = this.wave;
+    this.muts = this.nextMuts;
+    this.nextMuts = this.rollMutators(w + 1);
     this.nextTimer = 26;
     this.tinkerBonus = this.commander === "salvager" ? Math.min(0.4, 0.04 * this.tinker) : 0;
     this.tinker = 0;
@@ -1097,7 +1337,20 @@ export class Game {
       this.say(`熵增信标:敌人强化,以太 +${g}`, "#e879f9");
       this.beacon = false;
     }
-    for (const q of this.composeWave(w)) this.queue.push({ ...q, at: this.time + q.at });
+    for (const q of this.composeWave(w)) this.queue.push({ ...q, at: this.time + q.at, muts: this.muts });
+    if (this.rb.interest) {
+      const g = Math.min(80, Math.floor(this.scrap * this.rb.interest));
+      if (g > 0) {
+        this.scrap += g;
+        this.say(`战争利息 +${g}`, "#facc15");
+      }
+    }
+    if (this.rb.regen) {
+      this.lives = Math.min(this.maxLives, this.lives + this.rb.regen);
+      for (const b of this.buildings) b.hp = Math.min(b.maxHp, b.hp + b.maxHp * 0.25 * this.rb.regen);
+    }
+    if (this.muts.length) this.say(`本波变异:${this.muts.map((m) => MUTATORS.find((x) => x.id === m)!.name).join("、")}`, "#fb923c");
+    if (this.endless ? w % 4 === 0 || w % 10 === 0 : w === Math.ceil(this.cfg.waves / 2)) this.offerCards(this.endless && w % 10 === 0);
     this.queue.sort((a, b) => a.at - b.at);
     if (this.hasAffix("acid") && w > 1) {
       for (const b of this.buildings.slice()) {
@@ -1108,9 +1361,9 @@ export class Game {
       }
       this.say("强酸侵蚀了墙体与导管", "#a3e635");
     }
-    if (this.cfg.collapse && w % 3 === 0) this.collapse();
-    const bossWave = this.cfg.boss && w === this.cfg.waves;
-    this.say(bossWave ? `第 ${w} 波 — BOSS 来袭!` : `第 ${w} / ${this.cfg.waves} 波`, bossWave ? "#f472b6" : "#e2e8f0");
+    if (this.cfg.collapse && w % (this.endless ? 5 : 3) === 0) this.collapse();
+    const bossWave = (this.cfg.boss && w === this.cfg.waves) || (this.endless && w % 10 === 0);
+    this.say(bossWave ? `第 ${w} 波 — BOSS 来袭!` : this.endless ? `第 ${w} 波` : `第 ${w} / ${this.cfg.waves} 波`, bossWave ? "#f472b6" : "#e2e8f0");
     this.version++;
   }
   private collapse() {
@@ -1137,7 +1390,7 @@ export class Game {
 
   // ===== 主循环 =====
   update(dt: number) {
-    if (this.over || this.draft) return;
+    if (this.over || this.draft || this.cardOffer) return;
     this.time += dt;
     if (this.powerDirty) this.recomputePower();
     // 技能/增益
@@ -1157,9 +1410,11 @@ export class Game {
       const def = ENEMIES[q.type];
       const w = this.wave;
       let scale = this.hpScale(w);
-      if (def.boss) scale = (1 + 0.1 * this.cfg.id) * Math.pow(1 + 0.15 * (this.cfg.waves - 1), 0.8) * this.hpMul;
+      if (def.boss) scale = this.endless ? this.hpScale(w) * 1.3 : (1 + 0.1 * this.cfg.id) * Math.pow(1 + 0.15 * (this.cfg.waves - 1), 0.8) * this.hpMul;
       if (this.beaconActive) scale *= 1.35;
-      this.spawnEnemy(q.type, scale, sp.x + 0.5, sp.y + 0.5, { cx: sp.x, cy: sp.y, elite: q.elite, speedMul: this.beaconActive ? 1.1 : 1 });
+      let traits: string[] = [];
+      if (q.elite && (this.endless || this.cfg.chapter >= 2 || this.opts.asc >= 3)) traits = this.rollTraits(this.endless && w >= 12 && this.mr() < 0.5 ? 2 : 1);
+      this.spawnEnemy(q.type, scale, sp.x + 0.5, sp.y + 0.5, { cx: sp.x, cy: sp.y, elite: q.elite, speedMul: this.beaconActive ? 1.1 : 1, muts: q.muts, traits });
     }
     // 敌人
     this.updateEnemies(dt);
@@ -1183,6 +1438,15 @@ export class Game {
     for (const f of this.fx) f.t += dt;
     this.fx = this.fx.filter((f) => f.t < f.ttl);
     this.enemies = this.enemies.filter((e) => !e.dead);
+    if (this.lives <= 0 && this.rb.revive > 0) {
+      this.rb.revive--;
+      this.lives = Math.ceil(this.maxLives * 0.5);
+      for (const e of this.enemies) {
+        if (!e.def.boss) e.dead = true;
+      }
+      this.addFx({ k: "ring", x: this.core.x + 0.5, y: this.core.y + 0.5, r: 6, t: 0, ttl: 0.8, c: "#fde047" });
+      this.say("复活协议触发!基地重启,场上杂兵被清除", "#fde047");
+    }
     if (this.lives <= 0) {
       this.over = "lost";
       this.version++;
@@ -1204,6 +1468,18 @@ export class Game {
         e.burnT -= dt;
         this.hurt(e, e.burn * dt, "magma", { armorK: 0 });
         if (e.dead) continue;
+      }
+      if (e.regen > 0 && e.hp < e.maxHp) e.hp = Math.min(e.maxHp, e.hp + e.maxHp * e.regen * dt);
+      if (e.def.heal) {
+        e.tick -= dt;
+        if (e.tick <= 0) {
+          e.tick = 2.5;
+          for (const o of this.enemies) {
+            if (o.dead || o === e || o.hp >= o.maxHp) continue;
+            if (Math.hypot(o.x - e.x, o.y - e.y) <= 2.2) o.hp = Math.min(o.maxHp, o.hp + o.maxHp * (e.def.heal as number));
+          }
+          this.addFx({ k: "ring", x: e.x, y: e.y, r: 2.2, t: 0, ttl: 0.4, c: "#4ade80" });
+        }
       }
       if (e.adaptive) for (const k in e.mem) e.mem[k] *= 1 - 0.1 * dt;
       if (e.adaptive && Object.keys(e.mem).length === 0) e.res = 0;
@@ -1241,7 +1517,7 @@ export class Game {
       }
     }
     const slow = Math.min(0.9, e.slow + (this.empT > 0 ? 0.8 : 0));
-    let rem = e.spd * (1 - slow) * dt;
+    let rem = e.spd * (1 - slow) * this.rb.enemySpd * dt;
     if (e.tx >= 0 && this.bmap[e.ty * COLS + e.tx] && !e.def.breaker && e.phaseCh <= 0) e.tx = -1;
     for (let g = 0; g < 4 && rem > 0; g++) {
       if (e.tx < 0) {
@@ -1350,6 +1626,7 @@ export class Game {
     return list.slice(0, n).map((x) => x.e);
   }
   private updateBuilding(b: Building, dt: number) {
+    if (b.dead) return;
     if (b.flash > 0) b.flash -= dt;
     if (b.overCd > 0) b.overCd -= dt;
     if (b.overT > 0) b.overT -= dt;
@@ -1398,6 +1675,10 @@ export class Game {
             this.addFx({ k: "ring", x: t.x, y: t.y, r: 0.9, t: 0, ttl: 0.3, c: "#ffffff" });
           }
           this.applyElem(t, st, dps * dt * 4, dt);
+          if (b.type === "flamer") {
+            t.burn = Math.max(t.burn, st.dmg * 0.4);
+            t.burnT = Math.max(t.burnT, 1.5);
+          }
         }
         b.angle = Math.atan2(tg[0].y - b.y - 0.5, tg[0].x - b.x - 0.5);
         b.heat += base.heat * st.heatMul * hs * dt;
@@ -1430,6 +1711,8 @@ export class Game {
     const base = EMIT_BASE[b.type];
     const color = ELEM_COLOR[st.elem];
     b.angle = Math.atan2(tg[0].y - b.y - 0.5, tg[0].x - b.x - 0.5);
+    if (base.arc) return this.arcVolley(b, st, tg, mult);
+    if (base.line) return this.railVolley(b, st, tg, mult);
     for (let i = 0; i < st.shots; i++) {
       const t = tg[i % tg.length];
       let dmg = st.dmg * st.shotMul * mult;
@@ -1474,6 +1757,70 @@ export class Game {
         life: 3,
         color,
       });
+    }
+  }
+  // 特斯拉:瞬发连锁闪电
+  private arcVolley(b: Building, st: Stats, tg: Enemy[], mult: number) {
+    const color = ELEM_COLOR[st.elem];
+    const hops = 3 + st.hops;
+    for (let i = 0; i < st.shots; i++) {
+      let d = st.dmg * st.shotMul * mult;
+      const crit = Math.random() < st.crit;
+      if (crit) d *= st.critMul;
+      const hit = new Set<number>();
+      let cur: Enemy | null = tg[i % tg.length];
+      let px = b.x + 0.5;
+      let py = b.y + 0.5;
+      for (let h = 0; cur && h <= hops; h++) {
+        hit.add(cur.id);
+        this.hurt(cur, d, st.elem, { pen: st.pen, exec: st.exec, src: b });
+        this.applyElem(cur, st, d);
+        this.addFx({ k: "line", x: px, y: py, x2: cur.x, y2: cur.y, t: 0, ttl: 0.22, c: crit ? "#ffffff" : h === 0 ? "#fef08a" : color });
+        px = cur.x;
+        py = cur.y;
+        d *= 0.82;
+        let best: Enemy | null = null;
+        let bd = 2.4;
+        for (const o of this.enemies) {
+          if (o.dead || hit.has(o.id)) continue;
+          const dd = Math.hypot(o.x - px, o.y - py);
+          if (dd < bd) {
+            bd = dd;
+            best = o;
+          }
+        }
+        cur = best;
+      }
+    }
+  }
+  // 磁轨炮:贯穿直线上所有敌人
+  private railVolley(b: Building, st: Stats, tg: Enemy[], mult: number) {
+    const ox = b.x + 0.5;
+    const oy = b.y + 0.5;
+    const color = ELEM_COLOR[st.elem];
+    for (let i = 0; i < st.shots; i++) {
+      const t = tg[i % tg.length];
+      let dx = t.x - ox;
+      let dy = t.y - oy;
+      const L = Math.hypot(dx, dy) || 1;
+      dx /= L;
+      dy /= L;
+      const range = st.range + 1.2;
+      let d = st.dmg * st.shotMul * mult;
+      const crit = Math.random() < st.crit;
+      if (crit) d *= st.critMul;
+      for (const e of this.enemies.slice()) {
+        if (e.dead) continue;
+        const ex = e.x - ox;
+        const ey = e.y - oy;
+        const along = ex * dx + ey * dy;
+        if (along < 0 || along > range) continue;
+        if (Math.abs(ex * dy - ey * dx) > 0.4 + e.def.r) continue;
+        this.hurt(e, d, st.elem, { pen: st.pen, exec: st.exec, src: b });
+        this.applyElem(e, st, d);
+        this.addFx({ k: "spark", x: e.x, y: e.y, t: 0, ttl: 0.2, c: "#ffffff", r: 0.3 });
+      }
+      this.addFx({ k: "line", x: ox, y: oy, x2: ox + dx * range, y2: oy + dy * range, t: 0, ttl: 0.4, c: crit ? "#ffffff" : color, r: 3 });
     }
   }
   private applyElem(e: Enemy, st: { elem: Elem }, dmg: number, scale = 1) {
@@ -1591,6 +1938,7 @@ export class Game {
   shardReward() {
     const won = this.over === "won";
     const asc = 1 + 0.25 * this.opts.asc;
+    if (this.endless) return Math.round((Math.max(0, this.wave - 1) * 2.2 + this.bossKills * 8) * asc);
     if (!won) return Math.round(this.wave * 1.2 * asc);
     return Math.round((12 + this.cfg.id * 3 + this.stars() * 8 + (this.cfg.boss ? 40 : 0)) * asc);
   }

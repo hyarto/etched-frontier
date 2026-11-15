@@ -63,3 +63,17 @@ button:disabled {
   background: #334155;
   border-radius: 3px;
 }
+
+.card-in {
+  animation: cardIn 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(24px) rotateY(80deg) scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

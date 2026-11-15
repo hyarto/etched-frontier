@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AFFIX_MAP, BUILD_MAP, COLS, ELEM_COLOR, ELEM_NAME, ENEMIES, RETROFITS, ROWS, SKILL_MAP, type BuildDef, type LevelCfg } from "../game/data";
+import { AFFIX_MAP, BUILD_MAP, CARD_MAP, COLS, ELEM_COLOR, ELEM_NAME, ENEMIES, MUT_MAP, RARITY_INFO, RETROFITS, ROWS, SKILL_MAP, TRAITS, type BuildDef, type LevelCfg } from "../game/data";
 import { Game, type Building } from "../game/engine";
 import { layout, render, type View } from "../game/render";
 import { getSave, metaBonus, unlockedChapter, updateSave } from "../game/store";
@@ -12,6 +12,7 @@ export interface RunConfig {
   asc: number;
   seed: number;
   daily?: string;
+  endless?: boolean;
 }
 
 const STEP = 1 / 30;
@@ -34,7 +35,8 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
       affixes: run.affixes,
       asc: run.asc,
       seed: run.seed,
-      chapterUnlocked: run.daily ? 4 : unlockedChapter(s),
+      chapterUnlocked: run.daily || run.endless ? 4 : unlockedChapter(s),
+      endless: run.endless,
     });
   });
   const wrap = useRef<HTMLDivElement>(null);
@@ -47,7 +49,9 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
   const [showPath, setShowPath] = useState(true);
   const [panel, setPanel] = useState(true);
   const [toast, setToast] = useState<string>("");
-  const [saved, setSaved] = useState<{ shards: number; stars: number } | null>(null);
+  const [saved, setSaved] = useState<{ shards: number; stars: number; record?: boolean } | null>(null);
+  const [showCards, setShowCards] = useState(false);
+  const [confirmRetreat, setConfirmRetreat] = useState(false);
   const view = useRef<View>({ hover: null, tool: null, sel: null, targeting: false, showPath: true, w: 800, h: 450 });
   const speedRef = useRef(1);
   const painting = useRef(false);
@@ -70,7 +74,7 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
       const real = Math.min(0.1, (now - last) / 1000);
       last = now;
       const sp = speedRef.current;
-      if (sp > 0 && !g.draft && !g.over) {
+      if (sp > 0 && !g.draft && !g.cardOffer && !g.over) {
         acc += real * sp;
         let n = 0;
         while (acc >= STEP && n < 14) {
@@ -116,13 +120,20 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
     const shards = g.shardReward();
     const stars = g.stars();
     const won = g.over === "won";
-    if (won) sfx("win");
+    const record = !!run.endless && g.wave > getSave().endless.best;
+    if (won || record) sfx("win");
     else sfx("lose");
     updateSave((s) => {
       s.shards += shards;
       s.stats.runs++;
       s.stats.kills += g.kills;
       s.stats.bossKills += g.bossKills;
+      if (run.endless) {
+        s.endless.runs++;
+        s.endless.best = Math.max(s.endless.best, g.wave);
+        s.endless.bestKills = Math.max(s.endless.bestKills, g.kills);
+        s.endless.bestBoss = Math.max(s.endless.bestBoss, g.bossKills);
+      }
       if (won) {
         s.stats.wins++;
         if (!run.daily) {
@@ -135,7 +146,7 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
         s.daily[run.daily] = Math.max(s.daily[run.daily] || 0, score);
       }
     });
-    setSaved({ shards, stars });
+    setSaved({ shards, stars, record });
   }, [g.over, g, run, saved, g.version]);
 
   const flash = useCallback((m: string) => {
@@ -363,6 +374,11 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
           <button onClick={onExit} className="rounded bg-slate-800 px-2 py-0.5 hover:bg-slate-700">
             ← 退出
           </button>
+          {run.endless && (
+            <button onClick={() => (confirmRetreat ? (g.retreat(), setConfirmRetreat(false)) : (setConfirmRetreat(true), setTimeout(() => setConfirmRetreat(false), 2500)))} className={`rounded px-2 py-0.5 ${confirmRetreat ? "bg-rose-600 text-white" : "bg-slate-800 hover:bg-slate-700"}`}>
+              {confirmRetreat ? "再点确认撤退" : "撤退结算"}
+            </button>
+          )}
           <span className="text-rose-300">❤ {Math.max(0, g.lives)}/{g.maxLives}</span>
           <span className="text-amber-300">▣ {Math.floor(g.scrap)}</span>
           <span className="text-fuchsia-300">◆ {Math.floor(g.ether)}</span>
@@ -370,10 +386,13 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
             以太抽取 ◆{g.etherCost}
           </button>
           <span className="text-cyan-200">
-            波 {g.wave}/{g.cfg.waves}
+            波 {g.wave}/{g.endless ? "∞" : g.cfg.waves}
             {g.wave < g.cfg.waves && <span className="text-slate-400"> · {Math.ceil(g.nextTimer)}s</span>}
             {g.wave >= g.cfg.waves && <span className="text-slate-400"> · 剩余 {remaining}</span>}
           </span>
+          <button onClick={() => setShowCards(!showCards)} className={`rounded px-2 py-0.5 ${showCards ? "bg-amber-600 text-white" : "bg-slate-800 text-amber-200 hover:bg-slate-700"}`}>
+            ♠ 卡牌 {g.cardCount()}
+          </button>
           {g.wave < g.cfg.waves && (
             <>
               <button onClick={() => { g.callWave(); sfx("wave"); }} className="rounded bg-cyan-700 px-2 py-0.5 text-white hover:bg-cyan-600">
@@ -398,14 +417,26 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
             </button>
           </div>
         </div>
-        <div className="flex items-center gap-2 border-b border-slate-800/60 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-400">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-slate-800/60 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-400">
           {g.opts.affixes.map((a) => (
             <span key={a} title={AFFIX_MAP[a].desc} className="rounded bg-slate-800 px-1.5 py-0.5 text-amber-200">
               {AFFIX_MAP[a].icon} {AFFIX_MAP[a].name}
             </span>
           ))}
           {run.asc > 0 && <span className="rounded bg-red-900/60 px-1.5 py-0.5 text-red-200">熵增 {run.asc}</span>}
-          <span className="truncate">{g.cfg.chapter}-{g.cfg.idx + 1} {g.cfg.name}</span>
+          <span className="truncate">{g.endless ? "∞ 无尽回廊" : `${g.cfg.chapter}-${g.cfg.idx + 1} ${g.cfg.name}`}</span>
+          {g.muts.length > 0 && <span className="text-orange-300">本波变异</span>}
+          {g.muts.map((m) => (
+            <span key={"m" + m} title={MUT_MAP[m].desc} className="rounded border px-1.5 py-0.5" style={{ color: MUT_MAP[m].color, borderColor: MUT_MAP[m].color + "88", background: "#0b1220" }}>
+              {MUT_MAP[m].icon} {MUT_MAP[m].name}
+            </span>
+          ))}
+          {g.nextMuts.length > 0 && <span className="text-slate-500">下波预告 ›</span>}
+          {g.nextMuts.map((m) => (
+            <span key={"n" + m} title={MUT_MAP[m].desc + "(预告)"} className="animate-pulse rounded border border-dashed px-1.5 py-0.5" style={{ color: MUT_MAP[m].color, borderColor: MUT_MAP[m].color + "88" }}>
+              {MUT_MAP[m].icon} {MUT_MAP[m].name}
+            </span>
+          ))}
           {g.commander === "salvager" && <span className="text-emerald-300">拆建加成 +{Math.round(g.tinkerBonus * 100)}%(本波) · 已拆建 {g.tinker}</span>}
         </div>
         {/* 画布 */}
@@ -458,10 +489,86 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
               </div>
             ))}
           </div>
-          {speed === 0 && !g.over && !g.draft && <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30 text-3xl font-bold tracking-widest text-white/80">已暂停</div>}
+          {speed === 0 && !g.over && !g.draft && !g.cardOffer && <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30 text-3xl font-bold tracking-widest text-white/80">已暂停</div>}
           {g.wave === 0 && !g.over && (
             <div className="pointer-events-none absolute left-2 top-2 max-w-[260px] rounded bg-black/55 p-2 text-[11px] leading-snug text-slate-200">
               <b className="text-cyan-300">布防阶段:</b> 敌人将从左侧裂隙走向右侧核心。放置墙体拉长路径,用「能源核心 → 调制器 → 终端炮塔」相邻连接构成回路。
+            </div>
+          )}
+          {/* 卡牌列表 */}
+          {showCards && (
+            <div className="absolute left-2 top-2 z-10 max-h-[80%] w-60 overflow-y-auto rounded-lg border border-amber-500/50 bg-slate-950/95 p-2 text-[11px]">
+              <div className="mb-1 flex items-center justify-between">
+                <b className="text-amber-300">本局卡牌 ({g.cardCount()})</b>
+                <button onClick={() => setShowCards(false)} className="text-slate-400 hover:text-white">
+                  ✕
+                </button>
+              </div>
+              {g.cardOrder.length === 0 && <div className="text-slate-500">还没有抽到卡牌</div>}
+              {g.cardOrder.map((id) => {
+                const c = CARD_MAP[id];
+                return (
+                  <div key={id} className="mb-1 rounded border px-1.5 py-1" style={{ borderColor: RARITY_INFO[c.rarity].color + "99", background: RARITY_INFO[c.rarity].bg }}>
+                    <b style={{ color: RARITY_INFO[c.rarity].color }}>
+                      {c.icon} {c.name}
+                    </b>
+                    <span className="ml-1 text-slate-300">×{g.cardsTaken[id]}</span>
+                    <div className="text-slate-400">{id === "c_scrap" ? "立即获得废料" : c.desc}</div>
+                  </div>
+                );
+              })}
+              <div className="mt-1 border-t border-slate-800 pt-1 text-slate-500">
+                敌人词条:{TRAITS.map((t) => (
+                  <span key={t.id} title={t.desc} className="mr-1.5" style={{ color: t.color }}>
+                    {t.short}={t.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* 每局抽卡 */}
+          {g.cardOffer && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/80 p-3">
+              <div className="text-lg font-black text-amber-300">{g.wave === 0 ? "开局抽卡" : `第 ${g.wave} 波 · 抽卡增益`} · 三选一</div>
+              <div className="flex flex-wrap justify-center gap-3">
+                {g.cardOffer.map((c, i) => {
+                  const ri = RARITY_INFO[c.rarity];
+                  const have = g.cardsTaken[c.id] || 0;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => {
+                        g.pickCard(i);
+                        sfx("up");
+                      }}
+                      className="card-in flex h-44 w-40 flex-col rounded-xl border-2 p-3 text-left transition hover:-translate-y-1 hover:scale-105"
+                      style={{ borderColor: ri.color, background: ri.bg, animationDelay: `${i * 90}ms`, boxShadow: c.rarity === "epic" ? `0 0 22px ${ri.color}88` : c.rarity === "rare" ? `0 0 12px ${ri.color}55` : "none" }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-2xl" style={{ color: ri.color }}>
+                          {c.icon}
+                        </span>
+                        <span className="rounded px-1.5 py-0.5 text-[10px] font-bold text-black" style={{ background: ri.color }}>
+                          {ri.name}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-sm font-bold text-white">{c.name}</div>
+                      <div className="mt-1 flex-1 text-xs leading-snug text-slate-300">{c.id === "c_scrap" ? `立即获得 ${g.scrapCardValue()} 废料` : c.desc}</div>
+                      <div className="text-[10px] text-slate-400">{have > 0 ? `已持有 ×${have}(可叠加,上限 ${c.max >= 99 ? "∞" : c.max})` : c.max === 1 ? "单局唯一" : `可叠加,上限 ${c.max >= 99 ? "∞" : c.max}`}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                disabled={g.cardRerolls <= 0}
+                onClick={() => {
+                  g.rerollCards();
+                  sfx("draft");
+                }}
+                className="rounded-lg border border-amber-500 bg-amber-900/50 px-4 py-1.5 text-sm font-bold text-amber-200 disabled:opacity-40"
+              >
+                ⟳ 重抽 ({g.cardRerolls})
+              </button>
             </div>
           )}
           {/* 抽取 */}
@@ -483,12 +590,17 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
           {g.over && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/75 p-3">
               <div className={`w-80 rounded-xl border-2 p-5 text-center ${g.over === "won" ? "border-emerald-400 bg-slate-900" : "border-rose-500 bg-slate-900"}`}>
-                <div className={`mb-1 text-2xl font-black ${g.over === "won" ? "text-emerald-300" : "text-rose-400"}`}>{g.over === "won" ? "防线守住!" : "防线崩溃"}</div>
+                <div className={`mb-1 text-2xl font-black ${g.over === "won" ? "text-emerald-300" : "text-rose-400"}`}>{g.endless ? (g.retreated ? "战术撤退" : "防线崩溃") : g.over === "won" ? "防线守住!" : "防线崩溃"}</div>
                 {g.over === "won" && <div className="mb-2 text-2xl text-yellow-300">{"★".repeat(g.stars())}{"☆".repeat(3 - g.stars())}</div>}
                 <div className="mb-3 space-y-0.5 text-sm text-slate-300">
                   <div>
-                    抵达波数 {g.wave}/{g.cfg.waves} · 击杀 {g.kills}
+                    抵达波数 {g.wave}/{g.endless ? "∞" : g.cfg.waves} · 击杀 {g.kills}
                   </div>
+                  {g.endless && (
+                    <div className={saved?.record ? "font-bold text-yellow-300" : "text-slate-400"}>
+                      {saved?.record ? "★ 新纪录!" : `历史最佳 ${getSave().endless.best} 波`} · 本局卡牌 {g.cardCount()} 张 · Boss {g.bossKills}
+                    </div>
+                  )}
                   <div>失去生命 {g.lostLives}</div>
                   <div className="text-cyan-300">获得蚀刻碎片 +{saved?.shards ?? g.shardReward()}</div>
                   {run.daily && <div className="text-amber-300">每日种子得分 {g.wave * 100 + g.kills + (g.over === "won" ? 2000 + g.lives * 50 : 0)}</div>}
@@ -498,7 +610,7 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
                     返回
                   </button>
                   <button onClick={onRetry} className="rounded bg-cyan-700 px-3 py-1.5 text-sm hover:bg-cyan-600">
-                    重试
+                    {g.endless ? "再来一局" : "重试"}
                   </button>
                   {g.over === "won" && onNext && (
                     <button onClick={onNext} className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white hover:bg-emerald-500">
@@ -531,7 +643,7 @@ export default function Battle({ run, onExit, onNext, onRetry }: { run: RunConfi
           <div className="mt-auto rounded border border-slate-800 p-1.5 text-[10px] leading-snug text-slate-500">
             快捷键:空格暂停 · 1/2/3 倍速 · N 开波 · Q/W/E 技能 · 右键/Esc 取消。点击炸药桶引爆。
             <div className="mt-1 flex flex-wrap gap-x-2">
-              {Object.values(ENEMIES).filter((e) => !e.boss).slice(0, 8).map((e) => (
+              {Object.values(ENEMIES).filter((e) => !e.boss && e.id !== "mini").slice(0, 8).map((e) => (
                 <span key={e.id} style={{ color: e.color }}>● {e.name}</span>
               ))}
             </div>
